@@ -379,6 +379,27 @@ const getPlaceholderLogo = (ngoId) => {
   return placeholders[Number(ngoId) % placeholders.length];
 };
 
+// Human-readable relative time ("5 min ago") for activity feeds.
+// Mirrors the client's helper in CorporateDashboard.jsx.
+const timeAgo = (value) => {
+  if (!value) return "Just now";
+  const past = new Date(value);
+  if (Number.isNaN(past.getTime())) return "Just now";
+  const diffMinutes = Math.floor((Date.now() - past.getTime()) / (1000 * 60));
+  if (diffMinutes < 1) return "Just now";
+  if (diffMinutes < 60) return `${diffMinutes} min ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours} hour${diffHours > 1 ? "s" : ""} ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 7) return `${diffDays} day${diffDays > 1 ? "s" : ""} ago`;
+  const diffWeeks = Math.floor(diffDays / 7);
+  if (diffWeeks < 4) return `${diffWeeks} week${diffWeeks > 1 ? "s" : ""} ago`;
+  const diffMonths = Math.floor(diffDays / 30);
+  if (diffMonths < 12) return `${diffMonths} month${diffMonths > 1 ? "s" : ""} ago`;
+  const diffYears = Math.floor(diffDays / 365);
+  return `${diffYears} year${diffYears > 1 ? "s" : ""} ago`;
+};
+
 const transformNgoRow = (row) => {
   if (!row) return null;
   const focusAreas = parseFocusAreas(row.project_focus_area || row.focus_area);
@@ -2736,9 +2757,11 @@ app.post("/api/ngo/csr-requests/:requestId/accept", authenticate, async (req, re
     const { requestId } = req.params;
     const { response } = req.body;
 
-    // Get the CSR request
+    // Get the CSR request and lock its row until COMMIT/ROLLBACK.
+    // A concurrent accept of the same request waits here, then re-checks
+    // status = 'pending' and finds nothing, so it can't create a second partnership.
     const csrRequest = await client.query(
-      `SELECT * FROM csr_requests WHERE id = $1 AND ngo_user_id = $2 AND status = 'pending'`,
+      `SELECT * FROM csr_requests WHERE id = $1 AND ngo_user_id = $2 AND status = 'pending' FOR UPDATE`,
       [requestId, req.user.id]
     );
 
@@ -2755,11 +2778,17 @@ app.post("/api/ngo/csr-requests/:requestId/accept", authenticate, async (req, re
     );
     const ngoName = ngoProfileResult.rows[0]?.organization_name || req.user?.name || "NGO Partner";
 
-    // Update request status
-    await client.query(
-      `UPDATE csr_requests SET status = 'accepted', ngo_response = $1, responded_at = NOW() WHERE id = $2`,
+    // Update request status (only if still pending, as a second guard against double-accept)
+    const acceptResult = await client.query(
+      `UPDATE csr_requests SET status = 'accepted', ngo_response = $1, responded_at = NOW()
+       WHERE id = $2 AND status = 'pending'`,
       [response || null, requestId]
     );
+
+    if (acceptResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return sendErrorResponse(res, 409, "Request was already processed", null, 'NGO Accept Request');
+    }
 
     // Create active partnership
     const partnershipResult = await client.query(

@@ -1444,7 +1444,7 @@ app.get("/api/corporate/dashboard-stats", authenticate, async (req, res) => {
          LEFT JOIN projects p ON ap.project_id = p.id
          LEFT JOIN ngo_profiles np ON ap.ngo_user_id = np.user_id
          WHERE ap.corporate_user_id = $1
-         GROUP BY focus_area
+         GROUP BY 1
          ORDER BY total_value DESC`,
         [userId]
       ),
